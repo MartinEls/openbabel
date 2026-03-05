@@ -1,36 +1,33 @@
 package main
 
 import (
-	"bytes"
 	"fmt"
 	"os"
-	"os/exec"
+
+	"smiles3d/builder"
+	"smiles3d/smiles"
+	"smiles3d/uff"
+	"smiles3d/xyz"
 )
 
 // Generate3DXYZFromSMILES takes a SMILES string and generates a 3D XYZ representation
-// using the Open Babel executable.
-// It reproduces the behavior of `obabel -ismi -oxyz --gen3d`
-func Generate3DXYZFromSMILES(smiles string) (string, error) {
-	// Prepare the command
-	// We use echo to pipe the SMILES string into obabel
-	// Or we can pass it directly. obabel allows format -:<SMILES>
-	// However, standard way is passing as a file or stdin
-
-	cmd := exec.Command("obabel", "-ismi", "-oxyz", "--gen3d")
-
-	// Provide the SMILES string via stdin
-	cmd.Stdin = bytes.NewBufferString(smiles)
-
-	var outb, errb bytes.Buffer
-	cmd.Stdout = &outb
-	cmd.Stderr = &errb
-
-	err := cmd.Run()
+// using the native Go implementation.
+func Generate3DXYZFromSMILES(smilesStr string) (string, error) {
+	// Parse SMILES
+	mol, err := smiles.ParseSMILES(smilesStr)
 	if err != nil {
-		return "", fmt.Errorf("obabel failed: %v, stderr: %s", err, errb.String())
+		return "", fmt.Errorf("failed to parse SMILES: %v", err)
 	}
 
-	return outb.String(), nil
+	// Build Initial 3D Geometry
+	builder.Build3D(mol)
+
+	// Optimize Geometry using UFF
+	// Using 200 iterations and a conservative step size
+	uff.Optimize(mol, 200, 0.05)
+
+	// Write to XYZ format
+	return xyz.WriteXYZ(mol), nil
 }
 
 func main() {
