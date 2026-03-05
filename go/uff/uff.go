@@ -6,26 +6,162 @@ import (
 	"smiles3d/mol"
 )
 
-// Simplified UFF Parameters for CHNO atoms
-type UFFParams struct {
-	BondRadius float64 // R1
-	Angle      float64 // Theta0 (radians)
-	VdwRadius  float64 // x1
-	VdwDepth   float64 // D1
-	Zeff       float64 // Z*
-}
+// CalculateEnergy calculates the current UFF energy of the molecule (in kcal/mol).
+func CalculateEnergy(m *mol.Mol) float64 {
+	n := m.NumAtoms()
+	if n <= 1 {
+		return 0.0
+	}
 
-var params = map[int]UFFParams{
-	1:  {BondRadius: 0.354, Angle: math.Pi, VdwRadius: 2.886, VdwDepth: 0.044, Zeff: 0.712},                // H
-	6:  {BondRadius: 0.757, Angle: 109.47 * math.Pi / 180, VdwRadius: 3.851, VdwDepth: 0.105, Zeff: 1.912}, // C (sp3 default)
-	7:  {BondRadius: 0.700, Angle: 106.7 * math.Pi / 180, VdwRadius: 3.660, VdwDepth: 0.069, Zeff: 2.544},  // N (sp3)
-	8:  {BondRadius: 0.658, Angle: 104.51 * math.Pi / 180, VdwRadius: 3.500, VdwDepth: 0.060, Zeff: 3.250}, // O (sp3)
-	9:  {BondRadius: 0.614, Angle: math.Pi, VdwRadius: 3.364, VdwDepth: 0.050, Zeff: 4.041},                // F
-	15: {BondRadius: 1.050, Angle: 93.3 * math.Pi / 180, VdwRadius: 4.147, VdwDepth: 0.305, Zeff: 2.801},   // P
-	16: {BondRadius: 1.020, Angle: 92.1 * math.Pi / 180, VdwRadius: 4.035, VdwDepth: 0.274, Zeff: 3.486},   // S
-	17: {BondRadius: 0.990, Angle: math.Pi, VdwRadius: 3.947, VdwDepth: 0.227, Zeff: 4.254},                // Cl
-	35: {BondRadius: 1.140, Angle: math.Pi, VdwRadius: 4.189, VdwDepth: 0.320, Zeff: 5.760},                // Br
-	53: {BondRadius: 1.330, Angle: math.Pi, VdwRadius: 4.509, VdwDepth: 0.339, Zeff: 7.200},                // I
+	atomTypes := assignUFFTypes(m)
+	neighbors := make(map[int][]*mol.Atom)
+	for i := 1; i <= n; i++ {
+		neighbors[i] = m.GetNeighbors(m.GetAtom(i))
+	}
+
+	totalEnergy := 0.0
+
+	// 1. Bond Stretch Energy
+	for _, b := range m.Bonds {
+		a1 := b.BeginAtom
+		a2 := b.EndAtom
+		t1 := atomTypes[a1.Idx]
+		t2 := atomTypes[a2.Idx]
+
+		p1, ok1 := params[t1]
+		p2, ok2 := params[t2]
+		if !ok1 || !ok2 {
+			continue
+		}
+
+		bo := float64(b.Order)
+		if b.IsAromatic {
+			bo = 1.5
+		}
+
+		r0 := p1.BondRadius + p2.BondRadius
+		kb := 664.12 * (p1.Zeff * p2.Zeff) / math.Pow(r0, 3) * bo
+
+		dx := a2.X - a1.X
+		dy := a2.Y - a1.Y
+		dz := a2.Z - a1.Z
+		r := math.Sqrt(dx*dx + dy*dy + dz*dz)
+
+		// Harmonic oscillator energy: E = 0.5 * kb * (r - r0)^2
+		totalEnergy += 0.5 * kb * (r - r0) * (r - r0)
+	}
+
+	// 2. Angle Bend Energy
+	for i := 1; i <= n; i++ {
+		center := m.GetAtom(i)
+		tCenter := atomTypes[center.Idx]
+		pCenter, okC := params[tCenter]
+		if !okC {
+			continue
+		}
+
+		nbrs := neighbors[center.Idx]
+		if len(nbrs) < 2 {
+			continue
+		}
+
+		theta0 := pCenter.Angle
+		ka := 100.0 // Simplified fixed force constant for bending
+
+		for j := 0; j < len(nbrs); j++ {
+			for k := j + 1; k < len(nbrs); k++ {
+				a1 := nbrs[j]
+				a2 := nbrs[k]
+
+				v1x := a1.X - center.X
+				v1y := a1.Y - center.Y
+				v1z := a1.Z - center.Z
+				r1 := math.Sqrt(v1x*v1x + v1y*v1y + v1z*v1z)
+
+				v2x := a2.X - center.X
+				v2y := a2.Y - center.Y
+				v2z := a2.Z - center.Z
+				r2 := math.Sqrt(v2x*v2x + v2y*v2y + v2z*v2z)
+
+				if r1 < 0.001 || r2 < 0.001 {
+					continue
+				}
+
+				dot := v1x*v2x + v1y*v2y + v1z*v2z
+				cosTheta := dot / (r1 * r2)
+				if cosTheta > 1.0 {
+					cosTheta = 1.0
+				}
+				if cosTheta < -1.0 {
+					cosTheta = -1.0
+				}
+
+				theta := math.Acos(cosTheta)
+
+				// E = 0.5 * ka * (theta - theta0)^2
+				totalEnergy += 0.5 * ka * (theta - theta0) * (theta - theta0)
+			}
+		}
+	}
+
+	// 3. Van der Waals Energy
+	for i := 1; i <= n; i++ {
+		for j := i + 1; j <= n; j++ {
+			bonded := false
+			for _, a := range neighbors[i] {
+				if a.Idx == j {
+					bonded = true
+					break
+				}
+			}
+
+			is13 := false
+			if !bonded {
+				for _, a := range neighbors[i] {
+					for _, b := range neighbors[j] {
+						if a.Idx == b.Idx {
+							is13 = true
+							break
+						}
+					}
+				}
+			}
+
+			if bonded || is13 {
+				continue
+			}
+
+			a1 := m.GetAtom(i)
+			a2 := m.GetAtom(j)
+			t1 := atomTypes[i]
+			t2 := atomTypes[j]
+			p1, ok1 := params[t1]
+			p2, ok2 := params[t2]
+			if !ok1 || !ok2 {
+				continue
+			}
+
+			dx := a1.X - a2.X
+			dy := a1.Y - a2.Y
+			dz := a1.Z - a2.Z
+			r := math.Sqrt(dx*dx + dy*dy + dz*dz)
+			if r < 0.1 {
+				continue
+			}
+
+			xij := math.Sqrt(p1.VdwRadius * p2.VdwRadius)
+			dij := math.Sqrt(p1.VdwDepth * p2.VdwDepth)
+
+			xr := xij / r
+			xr6 := xr * xr * xr * xr * xr * xr
+			xr12 := xr6 * xr6
+
+			// E = D * ( (x/r)^12 - 2 * (x/r)^6 )
+			totalEnergy += dij * (xr12 - 2.0*xr6)
+		}
+	}
+
+	return totalEnergy
 }
 
 // Optimize takes a molecule and runs a simplified steepest descent UFF optimization.
@@ -34,6 +170,9 @@ func Optimize(m *mol.Mol, maxIter int, stepSize float64) {
 	if n <= 1 {
 		return
 	}
+
+	// Assign UFF string types
+	atomTypes := assignUFFTypes(m)
 
 	// Prepare connectivity (for angles and exclusion)
 	neighbors := make(map[int][]*mol.Atom)
@@ -48,8 +187,11 @@ func Optimize(m *mol.Mol, maxIter int, stepSize float64) {
 		for _, b := range m.Bonds {
 			a1 := b.BeginAtom
 			a2 := b.EndAtom
-			p1, ok1 := params[a1.AtomicNum]
-			p2, ok2 := params[a2.AtomicNum]
+			t1 := atomTypes[a1.Idx]
+			t2 := atomTypes[a2.Idx]
+
+			p1, ok1 := params[t1]
+			p2, ok2 := params[t2]
 
 			if !ok1 || !ok2 {
 				continue
@@ -98,7 +240,8 @@ func Optimize(m *mol.Mol, maxIter int, stepSize float64) {
 		// 2. Angle Bend Energy (Simplified)
 		for i := 1; i <= n; i++ {
 			center := m.GetAtom(i)
-			pCenter, okC := params[center.AtomicNum]
+			tCenter := atomTypes[center.Idx]
+			pCenter, okC := params[tCenter]
 			if !okC {
 				continue
 			}
@@ -274,8 +417,10 @@ func Optimize(m *mol.Mol, maxIter int, stepSize float64) {
 
 				a1 := m.GetAtom(i)
 				a2 := m.GetAtom(j)
-				p1, ok1 := params[a1.AtomicNum]
-				p2, ok2 := params[a2.AtomicNum]
+				t1 := atomTypes[i]
+				t2 := atomTypes[j]
+				p1, ok1 := params[t1]
+				p2, ok2 := params[t2]
 				if !ok1 || !ok2 {
 					continue
 				}
