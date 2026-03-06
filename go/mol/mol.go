@@ -15,13 +15,11 @@ type Atom struct {
 }
 
 func (a *Atom) Symbol() string {
-	symbols := map[int]string{
-		1: "H", 6: "C", 7: "N", 8: "O", 9: "F", 15: "P", 16: "S", 17: "Cl", 35: "Br", 53: "I",
+	sym := GetSymbol(a.AtomicNum)
+	if sym == "Xx" {
+		return fmt.Sprintf("X%d", a.AtomicNum)
 	}
-	if sym, ok := symbols[a.AtomicNum]; ok {
-		return sym
-	}
-	return fmt.Sprintf("X%d", a.AtomicNum)
+	return sym
 }
 
 // Bond represents a chemical bond.
